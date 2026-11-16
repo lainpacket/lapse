@@ -7,7 +7,12 @@
 	Quick start:
 
 		local Library = loadstring(source)()      -- or require() it as a ModuleScript
-		local Window = Library:CreateWindow({ Folder = "MyMenu" })
+		local Window = Library:CreateWindow({
+			Folder = "MyMenu",
+			Title = "My UI",
+			Subtitle = "Settings",
+			Account = { Name = "Player", Status = "Local profile" },
+		})
 		local Tab = Window:Tab({ Name = "Main", Icon = "SLIDERS_H" })
 		Tab:Box({ Name = "Settings", Column = 1 }):Toggle({ Name = "Enabled" })
 		Window:Finish()
@@ -25,10 +30,10 @@
 		Main:Slider({ Name = "Field Of View", Min = 0, Max = 180, Default = 90 })
 		Main:Combo({ Name = "Mode", Options = { "One", "Two" } })
 		Main:Multi({ Name = "Parts", Options = { "Head", "Chest" }, Default = { true, false } })
-		Main:SubMenu({ Name = "Pitch", Build = function(card)
-			card:Section({ Border = true }, function(section)
+		Main:SubMenu({ Name = "Pitch", Build = function(menu)
+			menu:Section({ Name = "Pitch Settings", Border = true }, function(section)
 				section:Toggle({ Name = "Checkbox" })
-			end, owner)
+			end)
 		end })
 		Window:Finish()                                               -- always last
 
@@ -54,6 +59,11 @@
 	Text, Status, Progress, collapsible Section, and virtualized DataTable controls. Window actions
 	registered with :RegisterAction appear in the Ctrl+K command palette. Library:SetReducedMotion(true)
 	disables transitions and is saved with the menu settings.
+
+	Window:SetTitle, Window:SetSubtitle, Window:SetDescription, and Window:SetAccount update the
+	window branding and local profile panel. Account accepts Name, Status, ActionText, and OnAction;
+	OnAction receives the window and current profile. This is profile display only, not authentication.
+	Never put passwords, API keys, or authorization secrets in a client-loaded script.
 
 	Themes. Dark.json and Light.json are written on first run. Edit them, or drop in another file,
 	and it appears under Style. { "Colors": { "Body": "0B0E16", "Text": "EBEBF0" } } is a whole
@@ -6979,12 +6989,18 @@ local function buildUserCard(win, profile)
 			scope:paint(function()
 				local a = scope.alpha
 				setText(name, profile.name, 12, FontSemi)
-				setText(till, tr(profile.till), 11)
-				setText(renew, tr("Renew"), 11)
+				setText(till, tr(profile.status), 11)
+				setText(renew, tr(profile.actionText or (profile.onAction and "Manage" or "")), 11)
+				renew.Visible = profile.onAction ~= nil or profile.actionText ~= nil
 				name.TextColor3, name.TextTransparency = T.Text, 1 - a
 				till.TextColor3, till.TextTransparency = T.Disabled, 1 - a
 				renew.TextColor3, renew.TextTransparency = Accent, 1 - a
 			end)
+			Hit(scope, renew, {
+				click = function()
+					if profile.onAction then profile.onAction(win, profile) end
+				end,
+			})
 			local flow = newFlow({ parent = content, scope = scope, x = 10, y = 56, w = 230, rw = 230, card = c, level = c.level, win = win, path = "settings" })
 			flow:Option("GLOBE", "Language", language, Library.Language + 1, function(_, i) Library:SetLanguage(i - 1) end)
 			flow:Option("TEXT_HEIGHT", "Menu Scale", scales, table.find(scaleValues, Scale) or 2, function(_, i) Library:SetScale(scaleValues[i]) end)
@@ -7434,20 +7450,51 @@ function Library:CreateWindow(o)
 	win.sideScope = sideScope
 	local function tracked(text, x, y, size, font, spacing, alpha)
 		local letters = {}
-		local pen = x
-		for i = 1, #text do
-			local ch = string.sub(text, i, i)
-			if ch ~= " " then table.insert(letters, Label(frame, ch, round(pen), y, size, font)) end
-			pen += measure(ch, size, font) + spacing
+		local function set(value)
+			local pen, visible = x, 0
+			for i = 1, #value do
+				local ch = string.sub(value, i, i)
+				if ch ~= " " then
+					visible += 1
+					local letter = letters[visible]
+					if not letter then
+						letter = Label(frame, "", 0, y, size, font)
+						letters[visible] = letter
+					end
+					setText(letter, ch, size, font)
+					setXY(letter, round(pen), y)
+					letter.Visible = true
+				end
+				pen += measure(ch, size, font) + spacing
+			end
+			for i = visible + 1, #letters do letters[i].Visible = false end
 		end
 		sideScope:paint(function()
 			for _, letter in letters do
 				letter.TextColor3, letter.TextTransparency = T.Text, 1 - alpha * sideScope.alpha
 			end
 		end)
+		set(text)
+		return set
 	end
-	tracked(o.Brand or "KILLARK", 28, 15, 14, FontSemi, 0.935, 1)
-	tracked(o.SubBrand or "DREAM TEAM", 28, 31, 11, FontSemi, 2.17, 0.62)
+	local title = o.Title or o.Brand or "KILLARK"
+	local subtitle = o.Subtitle or o.Description or o.SubBrand or "DREAM TEAM"
+	local setTitle = tracked(title, 28, 15, 14, FontSemi, 0.935, 1)
+	local setSubtitle = tracked(subtitle, 28, 31, 11, FontSemi, 2.17, 0.62)
+	win.title, win.subtitle = title, subtitle
+	function win:SetTitle(value)
+		assert(type(value) == "string", "Title must be a string")
+		win.title = value
+		setTitle(value)
+	end
+	function win:SetSubtitle(value)
+		assert(type(value) == "string", "Subtitle must be a string")
+		win.subtitle = value
+		setSubtitle(value)
+	end
+	function win:SetDescription(value)
+		return win:SetSubtitle(value)
+	end
 
 	win.sideInner = Box(frame, 10, 70, 150, 470)
 
@@ -7602,7 +7649,18 @@ function Library:CreateWindow(o)
 	buildSearch(win)
 
 	-- account block
-	local profile = { name = o.UserName or "kdt255", status = o.UserStatus or "Till: Lifetime", till = o.UserStatus or "Till: Lifetime" }
+	local account = type(o.Account) == "table" and o.Account or {}
+	local player = Players.LocalPlayer
+	local profile = {
+		name = account.Name or o.UserName or (player and player.Name) or "Guest",
+		status = account.Status or o.UserStatus or "Local profile",
+		actionText = account.ActionText,
+		onAction = account.OnAction,
+	}
+	assert(type(profile.name) == "string" and profile.name ~= "", "Account.Name must be a non-empty string")
+	assert(type(profile.status) == "string", "Account.Status must be a string")
+	assert(profile.actionText == nil or type(profile.actionText) == "string", "Account.ActionText must be a string")
+	assert(profile.onAction == nil or type(profile.onAction) == "function", "Account.OnAction must be a function")
 	local userHit = Box(frame, 10, 552, 150, 40)
 	table.insert(win.resizeCallbacks, function(_, newH) setXY(userHit, 10, newH - 48) end)
 	Avatar.new(userHit, 8, 5, 30, sideScope)
@@ -7623,6 +7681,27 @@ function Library:CreateWindow(o)
 	end
 	cardT.cb = paintUser
 	sideScope:paint(paintUser)
+	function win:SetAccount(values)
+		assert(type(values) == "table", "SetAccount expects a table")
+		if values.Name ~= nil then
+			assert(type(values.Name) == "string" and values.Name ~= "", "Account.Name must be a non-empty string")
+			profile.name = values.Name
+		end
+		if values.Status ~= nil then
+			assert(type(values.Status) == "string", "Account.Status must be a string")
+			profile.status = values.Status
+		end
+		if values.ActionText ~= nil then
+			assert(type(values.ActionText) == "string" or values.ActionText == false, "Account.ActionText must be a string or false")
+			profile.actionText = values.ActionText or nil
+		end
+		if values.OnAction ~= nil then
+			assert(type(values.OnAction) == "function" or values.OnAction == false, "Account.OnAction must be a function or false")
+			profile.onAction = values.OnAction or nil
+		end
+		paintUser()
+		if userCard then userCard.scope:refresh() end
+	end
 	local userHover = false
 	Hit(sideScope, userHit, {
 		hover = function(b) userHover = b; cardT:to((b or cardOpen) and 1 or 0) end,
